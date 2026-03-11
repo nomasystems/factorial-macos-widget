@@ -591,54 +591,35 @@ class FactorialService: ObservableObject {
     private func iso8601WithTimezone(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withColonSeparatorInTimeZone]
+        formatter.timeZone = TimeZone.current
         return formatter.string(from: date)
     }
 
     /// Parse a Factorial time string and pin it to today's date.
-    /// Factorial returns clockIn/clockOut as time-only ("10:20", "10:20:00") or
-    /// with a dummy reference date ("2000-01-01T10:20:00+01:00"). In all cases
-    /// we only care about the time component — the date is always today.
+    /// Factorial stores times as face-value local time regardless of any timezone
+    /// suffix it may include in responses. We extract the HH:mm:ss digits directly
+    /// and treat them as local time, ignoring any Z / +HH:mm offset entirely.
     private func parseTodayTime(_ str: String) -> Date? {
-        let cal = Calendar.current
+        // If there's a 'T', take what's after it; otherwise use the whole string
+        var s = str
+        if let i = s.firstIndex(of: "T") { s = String(s[s.index(after: i)...]) }
+
+        // Take the first 8 characters (covers "HH:mm:ss"); strip any trailing Z
+        let timeOnly = String(s.prefix(8)).replacingOccurrences(of: "Z", with: "")
+
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
-
-        // Try time-only formats first ("10:20", "10:20:00")
+        // No explicit timeZone → defaults to TimeZone.current; face value = local time
+        let cal = Calendar.current
         for fmt in ["HH:mm:ss", "HH:mm"] {
             df.dateFormat = fmt
-            if let t = df.date(from: str) {
+            if let t = df.date(from: timeOnly) {
                 let comps = cal.dateComponents([.hour, .minute, .second], from: t)
                 return cal.date(bySettingHour: comps.hour ?? 0,
                                 minute: comps.minute ?? 0,
                                 second: comps.second ?? 0,
                                 of: Date())
             }
-        }
-
-        // Try full datetime — parse it, then extract time and combine with today
-        let f = ISO8601DateFormatter()
-        for opts: ISO8601DateFormatter.Options in [
-            [.withInternetDateTime, .withFractionalSeconds, .withColonSeparatorInTimeZone],
-            [.withInternetDateTime, .withColonSeparatorInTimeZone]
-        ] {
-            f.formatOptions = opts
-            if let d = f.date(from: str) {
-                let comps = cal.dateComponents([.hour, .minute, .second], from: d)
-                return cal.date(bySettingHour: comps.hour ?? 0,
-                                minute: comps.minute ?? 0,
-                                second: comps.second ?? 0,
-                                of: Date())
-            }
-        }
-
-        // datetime without timezone
-        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        if let d = df.date(from: str) {
-            let comps = cal.dateComponents([.hour, .minute, .second], from: d)
-            return cal.date(bySettingHour: comps.hour ?? 0,
-                            minute: comps.minute ?? 0,
-                            second: comps.second ?? 0,
-                            of: Date())
         }
 
         print("[Factorial] WARNING: could not parse '\(str)'")
