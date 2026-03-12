@@ -41,6 +41,7 @@ class FactorialService: ObservableObject {
     @Published var needsAuth = false
     @Published var projectWorkers: [ProjectWorker] = []
     @Published var employeeId: Int = 0
+    @Published var userEmail: String = ""
     @Published var openShift: OpenShift?
     @Published var todayCompletedDuration: TimeInterval? = nil
     @Published var selectedProjectWorkerId: Int {
@@ -76,6 +77,11 @@ class FactorialService: ObservableObject {
             print("[Factorial] done: \(result.workers.count) workers, openShift=\(String(describing: result.openShift))")
 
             projectWorkers = result.workers
+            // Auto-select first project if nothing valid is selected
+            if !result.workers.isEmpty,
+               !result.workers.contains(where: { $0.id == selectedProjectWorkerId }) {
+                selectedProjectWorkerId = result.workers[0].id
+            }
             openShift = result.openShift
             todayCompletedDuration = result.todayCompletedDuration
             status = ""
@@ -83,8 +89,13 @@ class FactorialService: ObservableObject {
         } catch FactorialError.missingTokens {
             needsAuth = true
             status = "🔑 Re-autorización necesaria"
+            OTelClient.shared.track("auth_error", ["error.message": "missing_tokens"])
         } catch {
             status = "❌ \(error.localizedDescription)"
+            OTelClient.shared.track("api_error", [
+                "error.operation": "check_status",
+                "error.message": error.localizedDescription
+            ])
         }
     }
 
@@ -93,6 +104,11 @@ class FactorialService: ObservableObject {
         let shiftId = try await createShift(date: date, startTime: startTime, endTime: endTime, accessToken: token)
         try await createTimeRecord(shiftId: shiftId, projectWorkerId: selectedProjectWorkerId, accessToken: token)
         status = "✅ Fichado (\(isoDate(date)))"
+        let isToday = Calendar.current.isDateInToday(date)
+        OTelClient.shared.track("manual_clock_in", [
+            "project.worker.id": String(selectedProjectWorkerId),
+            "entry.is_today": isToday ? "true" : "false"
+        ])
     }
 
     // MARK: - Clock In/Out Now
@@ -152,9 +168,14 @@ class FactorialService: ObservableObject {
             throw FactorialError.apiError("ClockIn: respuesta inesperada")
         }
         if let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
+            let msg = extractErrorMessage(errors)
+            OTelClient.shared.track("api_error", ["error.operation": "clock_in_now", "error.message": msg])
+            throw FactorialError.apiError(msg)
         }
 
+        OTelClient.shared.track("clock_in_now", [
+            "project.worker.id": String(selectedProjectWorkerId)
+        ])
         await checkStatus()
     }
 
@@ -200,9 +221,12 @@ class FactorialService: ObservableObject {
            let mutations = dataObj["attendanceMutations"] as? [String: Any],
            let result = mutations["breakStartAttendanceShift"] as? [String: Any],
            let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
+            let msg = extractErrorMessage(errors)
+            OTelClient.shared.track("api_error", ["error.operation": "break_start", "error.message": msg])
+            throw FactorialError.apiError(msg)
         }
 
+        OTelClient.shared.track("break_start")
         await checkStatus()
     }
 
@@ -252,9 +276,12 @@ class FactorialService: ObservableObject {
            let mutations = dataObj["attendanceMutations"] as? [String: Any],
            let result = mutations["breakEndAttendanceShift"] as? [String: Any],
            let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
+            let msg = extractErrorMessage(errors)
+            OTelClient.shared.track("api_error", ["error.operation": "break_end", "error.message": msg])
+            throw FactorialError.apiError(msg)
         }
 
+        OTelClient.shared.track("break_end")
         await checkStatus()
     }
 
@@ -299,9 +326,15 @@ class FactorialService: ObservableObject {
            let mutations = dataObj["attendanceMutations"] as? [String: Any],
            let result = mutations["clockOutAttendanceShift"] as? [String: Any],
            let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
+            let msg = extractErrorMessage(errors)
+            OTelClient.shared.track("api_error", ["error.operation": "clock_out", "error.message": msg])
+            throw FactorialError.apiError(msg)
         }
 
+        let workedSeconds = (todayCompletedDuration ?? 0) + (openShift.map { Date().timeIntervalSince($0.clockIn) } ?? 0)
+        OTelClient.shared.track("clock_out", [
+            "worked.seconds": String(Int(workedSeconds))
+        ])
         await checkStatus()
     }
 
@@ -462,7 +495,7 @@ class FactorialService: ObservableObject {
         query EmployeeByAccessId($accessIds: [Int!]!) {
           employees {
             employeesConnection(accessIds: $accessIds) {
-              nodes { id }
+              nodes { id email }
             }
           }
         }
@@ -480,8 +513,13 @@ class FactorialService: ObservableObject {
               let employees = dataObj["employees"] as? [String: Any],
               let conn = employees["employeesConnection"] as? [String: Any],
               let nodes = conn["nodes"] as? [[String: Any]],
-              let id = nodes.first?["id"] as? Int, id != 0 else {
+              let node = nodes.first,
+              let id = node["id"] as? Int, id != 0 else {
             throw FactorialError.apiError("No se pudo obtener el employee ID")
+        }
+        if let email = node["email"] as? String, !email.isEmpty {
+            userEmail = email
+            OTelClient.shared.userEmail = email
         }
         return id
     }
