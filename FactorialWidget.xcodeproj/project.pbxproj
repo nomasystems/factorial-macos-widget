@@ -12,10 +12,10 @@
 		AA0000000000000000000015 /* FactorialService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000D /* FactorialService.swift */; };
 		AA0000000000000000000016 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000E /* TokenStore.swift */; };
 		AA0000000000000000000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000011 /* Assets.xcassets */; };
+		AA000000000000000000001F /* OTelClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000020 /* OTelClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		0B8F17412F5AEEC9004705FF /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		AA0000000000000000000008 /* FactorialWidget.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FactorialWidget.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA000000000000000000000A /* FactorialWidgetApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FactorialWidgetApp.swift; sourceTree = "<group>"; };
 		AA000000000000000000000B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -23,6 +23,7 @@
 		AA000000000000000000000E /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
 		AA0000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA0000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AA0000000000000000000020 /* OTelClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OTelClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,7 +50,6 @@
 			children = (
 				AA0000000000000000000009 /* FactorialWidget */,
 				AA0000000000000000000003 /* Products */,
-				0B8F17412F5AEEC9004705FF /* Secrets.xcconfig */,
 			);
 			sourceTree = "<group>";
 		};
@@ -60,6 +60,7 @@
 				AA000000000000000000000B /* ContentView.swift */,
 				AA000000000000000000000D /* FactorialService.swift */,
 				AA000000000000000000000E /* TokenStore.swift */,
+				AA0000000000000000000020 /* OTelClient.swift */,
 				AA0000000000000000000010 /* Info.plist */,
 				AA0000000000000000000011 /* Assets.xcassets */,
 			);
@@ -139,6 +140,7 @@
 				AA0000000000000000000013 /* ContentView.swift in Sources */,
 				AA0000000000000000000015 /* FactorialService.swift in Sources */,
 				AA0000000000000000000016 /* TokenStore.swift in Sources */,
+				AA000000000000000000001F /* OTelClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -147,11 +149,11 @@
 /* Begin XCBuildConfiguration section */
 		AA0000000000000000000019 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 0B8F17412F5AEEC9004705FF /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = FactorialWidget/Info.plist;
@@ -159,6 +161,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.noma.FactorialWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -172,6 +175,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = FactorialWidget/Info.plist;
@@ -179,6 +183,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 1.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.noma.FactorialWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

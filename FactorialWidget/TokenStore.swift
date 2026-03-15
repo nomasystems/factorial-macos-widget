@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.factorial.widget", category: "TokenStore")
 
 struct OAuthTokens: Codable {
     var access_token: String?
@@ -28,7 +31,11 @@ class TokenStore {
     func save(_ tokens: OAuthTokens) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
-        guard let data = try? encoder.encode(tokens) else { return }
-        try? data.write(to: tokenFile)
+        do {
+            let data = try encoder.encode(tokens)
+            try data.write(to: tokenFile, options: .atomic)
+        } catch {
+            logger.error("Failed to save tokens: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

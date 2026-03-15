@@ -37,23 +37,23 @@ open FactorialWidget/FactorialWidget.xcodeproj
 
 Requires Xcode 15+. No external dependencies.
 
-Create a `Secrets.xcconfig` file in the project root with your Factorial OAuth credentials (this file is gitignored):
+The app reads credentials and telemetry config from environment variables at runtime — no secrets are baked into the build. Set these via JAMF or any MDM tool:
 
 ```
-FACTORIAL_CLIENT_ID = <your_client_id>
-FACTORIAL_CLIENT_SECRET = <your_client_secret>
+FACTORIAL_CLIENT_ID=<your_client_id>
+FACTORIAL_CLIENT_SECRET=<your_client_secret>
+OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4318
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>
 ```
 
 ## Building a PKG
-
-Requires a `Secrets.xcconfig` with valid credentials (see [Development](#development)).
 
 ```bash
 chmod +x make-pkg.sh
 ./make-pkg.sh 1.0.0
 ```
 
-Produces `FactorialWidget-1.0.0.pkg`. Deliver this file to your sysadmin for MDM distribution.
+Produces `FactorialWidget-1.0.0.pkg`. Deliver this file to your sysadmin for MDM distribution. Credentials are injected via environment variables — no rebuild needed per environment.
 
 ## Release
 
@@ -65,3 +65,9 @@ git push origin v1.0.0
 ```
 
 The PKG is **not** attached to the GitHub release — it is built locally and distributed out-of-band.
+
+## Network
+
+The app requires HTTPS to `api.factorialhr.com` (Factorial API + OAuth).
+
+An App Transport Security exception for `46.27.220.60` is configured in `Info.plist` — this is the OTLP telemetry collector endpoint, which uses plain HTTP. Telemetry is fire-and-forget and does not affect widget functionality.

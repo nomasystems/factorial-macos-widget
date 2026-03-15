@@ -26,8 +26,5 @@ DerivedData/
 # CocoaPods
 Pods/
 
-# Local secrets (never commit)
-Secrets.xcconfig
-
 # Local build artifacts
 *.pkg

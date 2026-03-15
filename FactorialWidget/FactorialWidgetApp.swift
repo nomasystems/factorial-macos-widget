@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 
 private let menuBarIcon: NSImage = {
     let img = (NSImage(named: "FactorialIcon") ?? NSImage()).copy() as! NSImage
@@ -10,6 +11,10 @@ private let menuBarIcon: NSImage = {
 @main
 struct FactorialWidgetApp: App {
     @StateObject private var service = FactorialService()
+
+    init() {
+        try? SMAppService.mainApp.register()
+    }
 
     var body: some Scene {
         MenuBarExtra {

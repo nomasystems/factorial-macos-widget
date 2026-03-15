@@ -1,10 +1,12 @@
 import Foundation
 import AppKit
+import os
+
+private let logger = Logger(subsystem: "com.factorial.widget", category: "FactorialService")
 
 struct ProjectWorker: Identifiable, Equatable {
     let id: Int       // project_worker_id (usado en time-records)
     let name: String
-    let code: String?
 
     var displayName: String { name }
 }
@@ -33,27 +35,84 @@ enum FactorialError: LocalizedError {
 class FactorialService: ObservableObject {
     static let baseURL = "https://api.factorialhr.com"
 
-    private let clientId = Bundle.main.infoDictionary?["FactorialClientId"] as? String ?? ""
-    private let clientSecret = Bundle.main.infoDictionary?["FactorialClientSecret"] as? String ?? ""
+    private let clientId = ProcessInfo.processInfo.environment["FACTORIAL_CLIENT_ID"] ?? ""
+    private let clientSecret = ProcessInfo.processInfo.environment["FACTORIAL_CLIENT_SECRET"] ?? ""
+
+    // MARK: - Constants
+
+    private enum K {
+        static let source = "desktop"
+        static let locationType = "work_from_home"
+        static let apiVersion = "2025-01-01"
+        static let projectWorkerKey = "selectedProjectWorkerId"
+        static let employeeIdKey = "cachedEmployeeId"
+    }
+
+    // MARK: - URLSession with timeout
+
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
+    }()
+
+    // MARK: - Token cache
+
+    private var cachedAccessToken: String?
+    private var tokenExpiresAt: Date?
+
+    // MARK: - Published state
 
     @Published var status: String = "Comprobando..."
     @Published var isLoading = false
     @Published var needsAuth = false
     @Published var projectWorkers: [ProjectWorker] = []
     @Published var employeeId: Int = 0
+    @Published var userEmail: String = ""
     @Published var openShift: OpenShift?
     @Published var todayCompletedDuration: TimeInterval? = nil
     @Published var selectedProjectWorkerId: Int {
-        didSet { UserDefaults.standard.set(selectedProjectWorkerId, forKey: "selectedProjectWorkerId") }
+        didSet { UserDefaults.standard.set(selectedProjectWorkerId, forKey: K.projectWorkerKey) }
     }
 
     init() {
-        let saved = UserDefaults.standard.object(forKey: "selectedProjectWorkerId")
+        let saved = UserDefaults.standard.object(forKey: K.projectWorkerKey)
         selectedProjectWorkerId = saved != nil
-            ? UserDefaults.standard.integer(forKey: "selectedProjectWorkerId")
+            ? UserDefaults.standard.integer(forKey: K.projectWorkerKey)
             : 0
         Task { await checkStatus() }
     }
+
+    // MARK: - HTTP helper
+
+    private func performRequest(_ request: URLRequest) async throws -> Data {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw FactorialError.apiError("Sin respuesta HTTP")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw FactorialError.missingTokens }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw FactorialError.apiError("HTTP \(http.statusCode): \(body)")
+        }
+        return data
+    }
+
+    // MARK: - Token management
+
+    func getAccessToken() async throws -> String {
+        if let token = cachedAccessToken, let exp = tokenExpiresAt, Date() < exp {
+            return token
+        }
+        let token = try await refreshAccessToken()
+        cachedAccessToken = token
+        let expiresIn = TokenStore.shared.load().expires_in ?? 7200
+        tokenExpiresAt = Date().addingTimeInterval(TimeInterval(max(expiresIn - 60, 60)))
+        return token
+    }
+
+    // MARK: - Check status
 
     func checkStatus() async {
         guard !isLoading else { return }
@@ -61,50 +120,60 @@ class FactorialService: ObservableObject {
         defer { isLoading = false }
 
         do {
-            print("[Factorial] checkStatus start")
-            let token = try await refreshAccessToken()
-            print("[Factorial] token ok")
+            logger.info("checkStatus start")
+            let token = try await getAccessToken()
+            logger.info("token ok")
 
             let fetchedId = try await fetchMyEmployeeId(accessToken: token)
-            print("[Factorial] employeeId=\(fetchedId)")
+            logger.info("employeeId=\(fetchedId)")
             if fetchedId != employeeId {
                 employeeId = fetchedId
-                UserDefaults.standard.set(fetchedId, forKey: "cachedEmployeeId")
+                UserDefaults.standard.set(fetchedId, forKey: K.employeeIdKey)
             }
 
             let result = try await fetchStatusData(accessToken: token, employeeId: employeeId)
-            print("[Factorial] done: \(result.workers.count) workers, openShift=\(String(describing: result.openShift))")
+            logger.info("done: \(result.workers.count) workers, openShift=\(String(describing: result.openShift))")
 
             projectWorkers = result.workers
+            if !result.workers.isEmpty,
+               !result.workers.contains(where: { $0.id == selectedProjectWorkerId }) {
+                selectedProjectWorkerId = result.workers[0].id
+            }
             openShift = result.openShift
             todayCompletedDuration = result.todayCompletedDuration
             status = ""
             needsAuth = false
         } catch FactorialError.missingTokens {
+            cachedAccessToken = nil
+            tokenExpiresAt = nil
             needsAuth = true
             status = "🔑 Re-autorización necesaria"
+            OTelClient.shared.track("auth_error", ["error.message": "missing_tokens"])
         } catch {
             status = "❌ \(error.localizedDescription)"
+            OTelClient.shared.track("api_error", [
+                "error.operation": "check_status",
+                "error.message": error.localizedDescription
+            ])
         }
     }
 
     func clockIn(date: Date, startTime: Date, endTime: Date) async throws {
-        let token = try await refreshAccessToken()
+        let token = try await getAccessToken()
         let shiftId = try await createShift(date: date, startTime: startTime, endTime: endTime, accessToken: token)
         try await createTimeRecord(shiftId: shiftId, projectWorkerId: selectedProjectWorkerId, accessToken: token)
         status = "✅ Fichado (\(isoDate(date)))"
+        let isToday = Calendar.current.isDateInToday(date)
+        OTelClient.shared.track("manual_clock_in", [
+            "project.worker.id": String(selectedProjectWorkerId),
+            "entry.is_today": isToday ? "true" : "false"
+        ])
     }
 
-    // MARK: - Clock In/Out Now
+    // MARK: - Clock In/Out Now (GraphQL mutations)
 
     func clockInNow() async throws {
-        let token = try await refreshAccessToken()
-
-        let url = URL(string: "\(Self.baseURL)/graphql")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let token = try await getAccessToken()
 
         let mutation = """
         mutation ClockIn($locationType: AttendanceShiftLocationTypeEnum, $now: ISO8601DateTime!, $projectWorkerId: Int, $source: AttendanceEnumsShiftSourceEnum) {
@@ -126,46 +195,29 @@ class FactorialService: ObservableObject {
           }
         }
         """
-        let body: [String: Any] = [
-            "operationName": "ClockIn",
-            "variables": [
-                "now": iso8601WithTimezone(Date()),
-                "source": "desktop",
-                "locationType": "work_from_home",
-                "projectWorkerId": selectedProjectWorkerId
-            ],
-            "query": mutation
+        let variables: [String: Any] = [
+            "now": iso8601WithTimezone(Date()),
+            "source": K.source,
+            "locationType": K.locationType,
+            "projectWorkerId": selectedProjectWorkerId
         ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        try await executeGraphQLMutation(
+            operationName: "ClockIn",
+            query: mutation,
+            variables: variables,
+            resultKey: "clockInAttendanceShift",
+            accessToken: token
+        )
 
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw FactorialError.apiError("ClockIn: respuesta inválida")
-        }
-        if let gqlErrors = root["errors"] as? [[String: Any]], !gqlErrors.isEmpty {
-            throw FactorialError.apiError(gqlErrors.first?["message"] as? String ?? "Error de API")
-        }
-        guard let dataObj = root["data"] as? [String: Any],
-              let mutations = dataObj["attendanceMutations"] as? [String: Any],
-              let result = mutations["clockInAttendanceShift"] as? [String: Any] else {
-            throw FactorialError.apiError("ClockIn: respuesta inesperada")
-        }
-        if let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
-        }
-
+        OTelClient.shared.track("clock_in_now", [
+            "project.worker.id": String(selectedProjectWorkerId)
+        ])
         await checkStatus()
     }
 
     func breakStart() async throws {
-        let token = try await refreshAccessToken()
-
-        let url = URL(string: "\(Self.baseURL)/graphql")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let token = try await getAccessToken()
 
         let mutation = """
         mutation BreakStart($now: ISO8601DateTime!, $source: AttendanceEnumsShiftSourceEnum) {
@@ -177,43 +229,25 @@ class FactorialService: ObservableObject {
           }
         }
         """
-        let body: [String: Any] = [
-            "operationName": "BreakStart",
-            "variables": [
-                "now": iso8601WithTimezone(Date()),
-                "source": "desktop"
-            ],
-            "query": mutation
+        let variables: [String: Any] = [
+            "now": iso8601WithTimezone(Date()),
+            "source": K.source
         ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        try await executeGraphQLMutation(
+            operationName: "BreakStart",
+            query: mutation,
+            variables: variables,
+            resultKey: "breakStartAttendanceShift",
+            accessToken: token
+        )
 
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw FactorialError.apiError("BreakStart: respuesta inválida")
-        }
-        if let gqlErrors = root["errors"] as? [[String: Any]], !gqlErrors.isEmpty {
-            let msg = gqlErrors.first?["message"] as? String ?? "Error de API"
-            throw FactorialError.apiError(msg)
-        }
-        if let dataObj = root["data"] as? [String: Any],
-           let mutations = dataObj["attendanceMutations"] as? [String: Any],
-           let result = mutations["breakStartAttendanceShift"] as? [String: Any],
-           let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
-        }
-
+        OTelClient.shared.track("break_start")
         await checkStatus()
     }
 
     func breakEnd() async throws {
-        let token = try await refreshAccessToken()
-
-        let url = URL(string: "\(Self.baseURL)/graphql")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let token = try await getAccessToken()
 
         let mutation = """
         mutation BreakEnd($now: ISO8601DateTime!, $source: AttendanceEnumsShiftSourceEnum) {
@@ -227,45 +261,26 @@ class FactorialService: ObservableObject {
         """
         var variables: [String: Any] = [
             "now": iso8601WithTimezone(Date()),
-            "source": "desktop"
+            "source": K.source
         ]
         if selectedProjectWorkerId > 0 {
             variables["projectWorkerId"] = selectedProjectWorkerId
         }
-        let body: [String: Any] = [
-            "operationName": "BreakEnd",
-            "variables": variables,
-            "query": mutation
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        try await executeGraphQLMutation(
+            operationName: "BreakEnd",
+            query: mutation,
+            variables: variables,
+            resultKey: "breakEndAttendanceShift",
+            accessToken: token
+        )
 
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw FactorialError.apiError("BreakEnd: respuesta inválida")
-        }
-        if let gqlErrors = root["errors"] as? [[String: Any]], !gqlErrors.isEmpty {
-            let msg = gqlErrors.first?["message"] as? String ?? "Error de API"
-            throw FactorialError.apiError(msg)
-        }
-        if let dataObj = root["data"] as? [String: Any],
-           let mutations = dataObj["attendanceMutations"] as? [String: Any],
-           let result = mutations["breakEndAttendanceShift"] as? [String: Any],
-           let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
-        }
-
+        OTelClient.shared.track("break_end")
         await checkStatus()
     }
 
     func clockOutNow() async throws {
-        let token = try await refreshAccessToken()
-
-        let url = URL(string: "\(Self.baseURL)/graphql")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let token = try await getAccessToken()
 
         let mutation = """
         mutation ClockOut($now: ISO8601DateTime!, $source: AttendanceEnumsShiftSourceEnum) {
@@ -277,32 +292,72 @@ class FactorialService: ObservableObject {
           }
         }
         """
+        let variables: [String: Any] = [
+            "now": iso8601WithTimezone(Date()),
+            "source": K.source
+        ]
+
+        try await executeGraphQLMutation(
+            operationName: "ClockOut",
+            query: mutation,
+            variables: variables,
+            resultKey: "clockOutAttendanceShift",
+            accessToken: token
+        )
+
+        let workedSeconds = (todayCompletedDuration ?? 0) + (openShift.map { Date().timeIntervalSince($0.clockIn) } ?? 0)
+        OTelClient.shared.track("clock_out", [
+            "worked.seconds": String(Int(workedSeconds))
+        ])
+        await checkStatus()
+    }
+
+    // MARK: - GraphQL mutation helper
+
+    @discardableResult
+    private func executeGraphQLMutation(
+        operationName: String,
+        query: String,
+        variables: [String: Any],
+        resultKey: String,
+        accessToken: String
+    ) async throws -> [String: Any]? {
+        let url = URL(string: "\(Self.baseURL)/graphql")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
         let body: [String: Any] = [
-            "operationName": "ClockOut",
-            "variables": [
-                "now": iso8601WithTimezone(Date()),
-                "source": "desktop"
-            ],
-            "query": mutation
+            "operationName": operationName,
+            "variables": variables,
+            "query": query
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
 
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw FactorialError.apiError("ClockOut: respuesta inválida")
+            throw FactorialError.apiError("\(operationName): respuesta inválida")
         }
         if let gqlErrors = root["errors"] as? [[String: Any]], !gqlErrors.isEmpty {
             throw FactorialError.apiError(gqlErrors.first?["message"] as? String ?? "Error de API")
         }
-        if let dataObj = root["data"] as? [String: Any],
-           let mutations = dataObj["attendanceMutations"] as? [String: Any],
-           let result = mutations["clockOutAttendanceShift"] as? [String: Any],
-           let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
-            throw FactorialError.apiError(extractErrorMessage(errors))
+        guard let dataObj = root["data"] as? [String: Any],
+              let mutations = dataObj["attendanceMutations"] as? [String: Any],
+              let result = mutations[resultKey] as? [String: Any] else {
+            throw FactorialError.apiError("\(operationName): respuesta inesperada")
+        }
+        if let errors = result["errors"] as? [[String: Any]], !errors.isEmpty {
+            let msg = extractErrorMessage(errors)
+            OTelClient.shared.track("api_error", [
+                "error.operation": operationName.lowercased(),
+                "error.message": msg
+            ])
+            throw FactorialError.apiError(msg)
         }
 
-        await checkStatus()
+        return result
     }
 
     // MARK: - OAuth
@@ -315,6 +370,8 @@ class FactorialService: ObservableObject {
 
     func submitAuthorizationCode(_ code: String) async throws {
         try await exchangeCode(code)
+        cachedAccessToken = nil
+        tokenExpiresAt = nil
         needsAuth = false
         await checkStatus()
     }
@@ -334,7 +391,7 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
         let tokens = try JSONDecoder().decode(OAuthTokens.self, from: data)
 
         guard tokens.access_token != nil else {
@@ -363,7 +420,7 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
         var newTokens = try JSONDecoder().decode(OAuthTokens.self, from: data)
 
         guard let accessToken = newTokens.access_token, !accessToken.isEmpty else {
@@ -377,7 +434,7 @@ class FactorialService: ObservableObject {
         return accessToken
     }
 
-    // MARK: - API
+    // MARK: - REST API
 
     func createShift(date: Date, startTime: Date, endTime: Date, accessToken: String) async throws -> Int {
         let dateStr = isoDate(date)
@@ -385,7 +442,7 @@ class FactorialService: ObservableObject {
         let weekday = calendar.component(.weekday, from: date)
         let isoWeekday = weekday == 1 ? 7 : weekday - 1
 
-        let url = URL(string: "\(Self.baseURL)/api/2025-01-01/resources/attendance/shifts")!
+        let url = URL(string: "\(Self.baseURL)/api/\(K.apiVersion)/resources/attendance/shifts")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -395,7 +452,7 @@ class FactorialService: ObservableObject {
             "employee_id": employeeId,
             "date": dateStr,
             "workable": true,
-            "location_type": "work_from_home",
+            "location_type": K.locationType,
             "source": "api",
             "clock_in": "\(dateStr)T\(hhmm(startTime)):00Z",
             "clock_out": "\(dateStr)T\(hhmm(endTime)):00Z",
@@ -404,7 +461,7 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = json["id"] as? Int else {
             let msg = String(data: data, encoding: .utf8) ?? "Error desconocido"
@@ -414,7 +471,7 @@ class FactorialService: ObservableObject {
     }
 
     func createTimeRecord(shiftId: Int, projectWorkerId: Int, accessToken: String) async throws {
-        let url = URL(string: "\(Self.baseURL)/api/2025-01-01/resources/project-management/time-records")!
+        let url = URL(string: "\(Self.baseURL)/api/\(K.apiVersion)/resources/project-management/time-records")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -427,7 +484,7 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["id"] != nil else {
             let msg = String(data: data, encoding: .utf8) ?? "Error desconocido"
@@ -462,7 +519,7 @@ class FactorialService: ObservableObject {
         query EmployeeByAccessId($accessIds: [Int!]!) {
           employees {
             employeesConnection(accessIds: $accessIds) {
-              nodes { id }
+              nodes { id email }
             }
           }
         }
@@ -474,14 +531,19 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataObj = root["data"] as? [String: Any],
               let employees = dataObj["employees"] as? [String: Any],
               let conn = employees["employeesConnection"] as? [String: Any],
               let nodes = conn["nodes"] as? [[String: Any]],
-              let id = nodes.first?["id"] as? Int, id != 0 else {
+              let node = nodes.first,
+              let id = node["id"] as? Int, id != 0 else {
             throw FactorialError.apiError("No se pudo obtener el employee ID")
+        }
+        if let email = node["email"] as? String, !email.isEmpty {
+            userEmail = email
+            OTelClient.shared.userEmail = email
         }
         return id
     }
@@ -529,7 +591,7 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await performRequest(request)
 
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataObj = root["data"] as? [String: Any] else {
@@ -544,7 +606,7 @@ class FactorialService: ObservableObject {
             guard let id = pw["id"] as? Int,
                   let proj = pw["imputableProject"] as? [String: Any],
                   let name = proj["name"] as? String else { return nil }
-            return ProjectWorker(id: id, name: name, code: proj["code"] as? String)
+            return ProjectWorker(id: id, name: name)
         }.sorted { $0.displayName < $1.displayName }
 
         // Parse open shift
@@ -622,7 +684,7 @@ class FactorialService: ObservableObject {
             }
         }
 
-        print("[Factorial] WARNING: could not parse '\(str)'")
+        logger.warning("Could not parse '\(str, privacy: .public)'")
         return nil
     }
 
