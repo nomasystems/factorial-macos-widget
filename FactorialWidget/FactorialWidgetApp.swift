@@ -21,9 +21,68 @@ struct FactorialWidgetApp: App {
             ContentView()
                 .environmentObject(service)
         } label: {
-            Image(nsImage: menuBarIcon)
+            Image(nsImage: buildMenuBarImage(timerText: service.menuBarTimer,
+                                             shiftState: service.shiftState))
         }
         .menuBarExtraStyle(.window)
 
     }
+}
+
+// MARK: - Composite menu bar image
+
+/// Renders [dot] [timer] [icon] into a single template-ready NSImage
+/// so we have full control over layout in the MenuBarExtra label.
+private func buildMenuBarImage(timerText: String, shiftState: FactorialService.ShiftState) -> NSImage {
+    let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    let iconSize: CGFloat = 18
+    let dotRadius: CGFloat = 3
+    let spacing: CGFloat = 4
+
+    let showTimer = !timerText.isEmpty
+
+    // Measure timer text
+    let timerAttrs: [NSAttributedString.Key: Any] = [.font: font]
+    let timerSize = showTimer ? (timerText as NSString).size(withAttributes: timerAttrs) : .zero
+
+    // Total width: dot + spacing + timer + spacing + icon
+    var totalWidth: CGFloat = iconSize
+    if showTimer {
+        totalWidth = dotRadius * 2 + spacing + timerSize.width + spacing + iconSize
+    } else {
+        totalWidth = dotRadius * 2 + spacing + iconSize
+    }
+    let totalHeight: CGFloat = iconSize
+
+    let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { rect in
+        var x: CGFloat = 0
+        let midY = rect.midY
+
+        // Draw dot
+        let dotColor: NSColor = switch shiftState {
+        case .active: .systemGreen
+        case .paused: .systemOrange
+        case .idle:   .systemRed
+        }
+        dotColor.setFill()
+        let dotRect = NSRect(x: x, y: midY - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
+        NSBezierPath(ovalIn: dotRect).fill()
+        x += dotRadius * 2 + spacing
+
+        // Draw timer text
+        if showTimer {
+            let textY = midY - timerSize.height / 2
+            (timerText as NSString).draw(at: NSPoint(x: x, y: textY), withAttributes: timerAttrs)
+            x += timerSize.width + spacing
+        }
+
+        // Draw icon
+        menuBarIcon.draw(in: NSRect(x: x, y: midY - iconSize / 2, width: iconSize, height: iconSize))
+
+        return true
+    }
+
+    // Don't set isTemplate — we handle colors directly
+    image.isTemplate = false
+    return image
 }
