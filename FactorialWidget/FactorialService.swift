@@ -72,6 +72,11 @@ class FactorialService: ObservableObject {
     @Published var userEmail: String = ""
     @Published var openShift: OpenShift?
     @Published var todayCompletedDuration: TimeInterval? = nil
+    enum ShiftState { case idle, active, paused }
+    @Published var menuBarTimer: String = ""
+    @Published var shiftState: ShiftState = .idle
+    private var menuBarTimerHandle: Timer?
+
     @Published var selectedProjectWorkerId: Int {
         didSet { UserDefaults.standard.set(selectedProjectWorkerId, forKey: K.projectWorkerKey) }
     }
@@ -141,6 +146,7 @@ class FactorialService: ObservableObject {
             }
             openShift = result.openShift
             todayCompletedDuration = result.todayCompletedDuration
+            updateMenuBarTimer()
             status = ""
             needsAuth = false
         } catch FactorialError.missingTokens {
@@ -420,7 +426,14 @@ class FactorialService: ObservableObject {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let data = try await performRequest(request)
+        let data: Data
+        do {
+            data = try await performRequest(request)
+        } catch {
+            // OAuth token endpoint returns HTTP 400 for invalid/expired refresh tokens.
+            // Treat any HTTP error here as a token issue so the re-auth flow kicks in.
+            throw FactorialError.missingTokens
+        }
         var newTokens = try JSONDecoder().decode(OAuthTokens.self, from: data)
 
         guard let accessToken = newTokens.access_token, !accessToken.isEmpty else {
@@ -693,5 +706,41 @@ class FactorialService: ObservableObject {
         if let msg = first["message"] as? String { return msg }
         if let msgs = first["messages"] as? [String], !msgs.isEmpty { return msgs.joined(separator: ", ") }
         return "Error desconocido"
+    }
+
+    // MARK: - Menu bar timer
+
+    private func updateMenuBarTimer() {
+        menuBarTimerHandle?.invalidate()
+        menuBarTimerHandle = nil
+
+        guard let shift = openShift else {
+            shiftState = .idle
+            menuBarTimer = ""
+            return
+        }
+
+        if shift.isBreak {
+            // Paused: show frozen timer with accumulated time only
+            shiftState = .paused
+            let s = Int(max(0, todayCompletedDuration ?? 0))
+            menuBarTimer = String(format: "%d:%02d", s / 3600, (s % 3600) / 60)
+        } else {
+            // Active: tick every 60s
+            shiftState = .active
+            tickMenuBarTimer(clockIn: shift.clockIn)
+            menuBarTimerHandle = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, let shift = self.openShift, !shift.isBreak else { return }
+                    self.tickMenuBarTimer(clockIn: shift.clockIn)
+                }
+            }
+        }
+    }
+
+    private func tickMenuBarTimer(clockIn: Date) {
+        let elapsed = (todayCompletedDuration ?? 0) + Date().timeIntervalSince(clockIn)
+        let s = Int(max(0, elapsed))
+        menuBarTimer = String(format: "%d:%02d", s / 3600, (s % 3600) / 60)
     }
 }
