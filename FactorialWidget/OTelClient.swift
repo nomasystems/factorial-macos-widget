@@ -16,6 +16,7 @@ class OTelClient {
     private let endpoint: URL?
     private let headers: [String: String]
     private let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    private let deviceUser: String = NSUserName()
 
     private init() {
         let env = ProcessInfo.processInfo.environment
@@ -88,6 +89,7 @@ class OTelClient {
                     otlpStr("service.name", "factorial-widget"),
                     otlpStr("service.version", appVersion),
                     otlpStr("job", "factorial-widget"),
+                    otlpStr("device.user", deviceUser),
                 ]],
                 "scopeLogs": [[
                     "scope": ["name": "factorial-widget"],

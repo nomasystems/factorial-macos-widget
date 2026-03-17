@@ -55,10 +55,14 @@ private func buildMenuBarImage(timerText: String, shiftState: FactorialService.S
     let totalHeight: CGFloat = iconSize
 
     let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { rect in
+        // Detect menu bar appearance at render time to pick the right foreground color
+        let isDark = NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let fg: NSColor = isDark ? .white : .black
+
         var x: CGFloat = 0
         let midY = rect.midY
 
-        // Draw dot
+        // Draw dot (always colored)
         let dotColor: NSColor = switch shiftState {
         case .active: .systemGreen
         case .paused: .systemOrange
@@ -69,20 +73,24 @@ private func buildMenuBarImage(timerText: String, shiftState: FactorialService.S
         NSBezierPath(ovalIn: dotRect).fill()
         x += dotRadius * 2 + spacing
 
-        // Draw timer text
+        // Draw timer text (adapts to menu bar appearance)
         if showTimer {
+            let coloredAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
             let textY = midY - timerSize.height / 2
-            (timerText as NSString).draw(at: NSPoint(x: x, y: textY), withAttributes: timerAttrs)
+            (timerText as NSString).draw(at: NSPoint(x: x, y: textY), withAttributes: coloredAttrs)
             x += timerSize.width + spacing
         }
 
-        // Draw icon
-        menuBarIcon.draw(in: NSRect(x: x, y: midY - iconSize / 2, width: iconSize, height: iconSize))
+        // Draw icon tinted to match menu bar appearance
+        let iconRect = NSRect(x: x, y: midY - iconSize / 2, width: iconSize, height: iconSize)
+        menuBarIcon.draw(in: iconRect)
+        fg.setFill()
+        iconRect.fill(using: .sourceAtop)
 
         return true
     }
 
-    // Don't set isTemplate — we handle colors directly
+    // Non-template so macOS doesn't override our colors (dot must stay colored)
     image.isTemplate = false
     return image
 }
