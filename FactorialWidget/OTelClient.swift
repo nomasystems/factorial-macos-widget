@@ -11,6 +11,12 @@ private let logger = Logger(subsystem: "com.factorial.widget", category: "OTelCl
 class OTelClient {
     static let shared = OTelClient()
 
+    enum Severity {
+        case info, warn, error
+        var number: Int { switch self { case .info: return 9; case .warn: return 13; case .error: return 17 } }
+        var text: String { switch self { case .info: return "INFO"; case .warn: return "WARN"; case .error: return "ERROR" } }
+    }
+
     var userEmail: String = ""
 
     private let endpoint: URL?
@@ -45,7 +51,7 @@ class OTelClient {
     }
 
     /// Send a named event with optional extra attributes. Fire-and-forget.
-    func track(_ event: String, _ extra: [String: String] = [:]) {
+    func track(_ event: String, _ extra: [String: String] = [:], severity: Severity = .info) {
         guard let endpoint, !headers.isEmpty else { return }
 
         var attrs: [[String: Any]] = [
@@ -57,7 +63,7 @@ class OTelClient {
             attrs.append(otlpStr(k, v))
         }
 
-        let payload = buildPayload(event, attrs)
+        let payload = buildPayload(event, attrs, severity: severity)
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
 
         let req = buildRequest(url: endpoint, body: body)
@@ -81,7 +87,7 @@ class OTelClient {
         return req
     }
 
-    private func buildPayload(_ event: String, _ attrs: [[String: Any]]) -> [String: Any] {
+    private func buildPayload(_ event: String, _ attrs: [[String: Any]], severity: Severity) -> [String: Any] {
         let nowNs = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
         return [
             "resourceLogs": [[
@@ -95,8 +101,8 @@ class OTelClient {
                     "scope": ["name": "factorial-widget"],
                     "logRecords": [[
                         "timeUnixNano": String(nowNs),
-                        "severityNumber": 9,
-                        "severityText": "INFO",
+                        "severityNumber": severity.number,
+                        "severityText": severity.text,
                         "body": ["stringValue": event],
                         "attributes": attrs
                     ]]

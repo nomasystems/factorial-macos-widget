@@ -152,9 +152,15 @@ class FactorialService: ObservableObject {
         } catch FactorialError.missingTokens {
             cachedAccessToken = nil
             tokenExpiresAt = nil
+            let wasAlreadyNeedingAuth = needsAuth
             needsAuth = true
             status = "🔑 Re-autorización necesaria"
-            OTelClient.shared.track("auth_error", ["error.message": "missing_tokens"])
+            if !wasAlreadyNeedingAuth {
+                OTelClient.shared.track("auth_required", [
+                    "auth.client_id_set": clientId.isEmpty ? "false" : "true",
+                    "auth.has_existing_tokens": TokenStore.shared.load().refresh_token.map { !$0.isEmpty } == true ? "true" : "false"
+                ])
+            }
         } catch {
             status = "❌ \(error.localizedDescription)"
             OTelClient.shared.track("api_error", [
@@ -369,16 +375,25 @@ class FactorialService: ObservableObject {
     // MARK: - OAuth
 
     func openAuthorizationURL() {
+        OTelClient.shared.track("oauth_flow_started", [
+            "auth.client_id_set":       clientId.isEmpty     ? "false" : "true",
+            "auth.client_secret_set":   clientSecret.isEmpty ? "false" : "true",
+            "auth.has_existing_tokens": TokenStore.shared.load().refresh_token.map { !$0.isEmpty } == true ? "true" : "false"
+        ])
         let authURLString = "\(Self.baseURL)/oauth/authorize?client_id=\(clientId)&redirect_uri=urn:ietf:wg:oauth:2.0:oob&response_type=code&scope=read%20write"
         guard let authURL = URL(string: authURLString) else { return }
         NSWorkspace.shared.open(authURL)
     }
 
     func submitAuthorizationCode(_ code: String) async throws {
+        let isReauth = TokenStore.shared.load().refresh_token.map { !$0.isEmpty } == true
         try await exchangeCode(code)
         cachedAccessToken = nil
         tokenExpiresAt = nil
         needsAuth = false
+        OTelClient.shared.track("oauth_flow_completed", [
+            "auth.type": isReauth ? "reauth" : "initial_auth"
+        ])
         await checkStatus()
     }
 
@@ -429,9 +444,28 @@ class FactorialService: ObservableObject {
         let data: Data
         do {
             data = try await performRequest(request)
+        } catch FactorialError.missingTokens {
+            // 401 from the token endpoint (unusual — normally it's 400)
+            OTelClient.shared.track("token_refresh_failed", [
+                "error.http_status":       "401",
+                "error.client_id_set":     clientId.isEmpty     ? "false" : "true",
+                "error.client_secret_set": clientSecret.isEmpty ? "false" : "true"
+            ], severity: .error)
+            throw FactorialError.missingTokens
+        } catch FactorialError.apiError(let msg) {
+            // Typically HTTP 400 when the refresh token is expired or revoked.
+            // msg contains "HTTP 400: <response body>" — truncated to 300 chars.
+            OTelClient.shared.track("token_refresh_failed", [
+                "error.message":           String(msg.prefix(300)),
+                "error.client_id_set":     clientId.isEmpty     ? "false" : "true",
+                "error.client_secret_set": clientSecret.isEmpty ? "false" : "true"
+            ], severity: .error)
+            throw FactorialError.missingTokens
         } catch {
-            // OAuth token endpoint returns HTTP 400 for invalid/expired refresh tokens.
-            // Treat any HTTP error here as a token issue so the re-auth flow kicks in.
+            OTelClient.shared.track("token_refresh_failed", [
+                "error.message":       String(error.localizedDescription.prefix(300)),
+                "error.client_id_set": clientId.isEmpty ? "false" : "true"
+            ], severity: .error)
             throw FactorialError.missingTokens
         }
         var newTokens = try JSONDecoder().decode(OAuthTokens.self, from: data)
