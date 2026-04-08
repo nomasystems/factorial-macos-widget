@@ -13,6 +13,8 @@
 		AA0000000000000000000016 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000E /* TokenStore.swift */; };
 		AA0000000000000000000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000011 /* Assets.xcassets */; };
 		AA000000000000000000001F /* OTelClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000020 /* OTelClient.swift */; };
+		AA0000000000000000000021 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000022 /* Models.swift */; };
+		AA0000000000000000000024 /* AnimationPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000023 /* AnimationPreviews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +26,8 @@
 		AA0000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA0000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA0000000000000000000020 /* OTelClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OTelClient.swift; sourceTree = "<group>"; };
+		AA0000000000000000000022 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		AA0000000000000000000023 /* AnimationPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimationPreviews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -61,6 +65,8 @@
 				AA000000000000000000000D /* FactorialService.swift */,
 				AA000000000000000000000E /* TokenStore.swift */,
 				AA0000000000000000000020 /* OTelClient.swift */,
+				AA0000000000000000000022 /* Models.swift */,
+				AA0000000000000000000023 /* AnimationPreviews.swift */,
 				AA0000000000000000000010 /* Info.plist */,
 				AA0000000000000000000011 /* Assets.xcassets */,
 			);
@@ -141,6 +147,8 @@
 				AA0000000000000000000015 /* FactorialService.swift in Sources */,
 				AA0000000000000000000016 /* TokenStore.swift in Sources */,
 				AA000000000000000000001F /* OTelClient.swift in Sources */,
+				AA0000000000000000000021 /* Models.swift in Sources */,
+				AA0000000000000000000024 /* AnimationPreviews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

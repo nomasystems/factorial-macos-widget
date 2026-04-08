@@ -77,6 +77,30 @@ class FactorialService: ObservableObject {
     @Published var shiftState: ShiftState = .idle
     private var menuBarTimerHandle: Timer?
 
+    // Shift segments for arc visualization
+    @Published var shiftSegments: [ShiftSegment] = []
+    private var workdayStart: Date? = nil
+
+    // 10-day history
+    @Published var recentDays: [DaySummary] = []
+
+    // Quick clock-in state
+    @Published var quickClockingDates: Set<String> = []   // in-flight API calls
+    @Published var celebratingDates: Set<String> = []     // checkmark (~1.5s)
+
+    @Published var quickClockStartHour: Int {
+        didSet { UserDefaults.standard.set(quickClockStartHour, forKey: "quickClockStartHour") }
+    }
+    @Published var quickClockStartMinute: Int {
+        didSet { UserDefaults.standard.set(quickClockStartMinute, forKey: "quickClockStartMinute") }
+    }
+    @Published var quickClockEndHour: Int {
+        didSet { UserDefaults.standard.set(quickClockEndHour, forKey: "quickClockEndHour") }
+    }
+    @Published var quickClockEndMinute: Int {
+        didSet { UserDefaults.standard.set(quickClockEndMinute, forKey: "quickClockEndMinute") }
+    }
+
     @Published var selectedProjectWorkerId: Int {
         didSet { UserDefaults.standard.set(selectedProjectWorkerId, forKey: K.projectWorkerKey) }
     }
@@ -86,6 +110,13 @@ class FactorialService: ObservableObject {
         selectedProjectWorkerId = saved != nil
             ? UserDefaults.standard.integer(forKey: K.projectWorkerKey)
             : 0
+
+        let ud = UserDefaults.standard
+        quickClockStartHour = ud.object(forKey: "quickClockStartHour") != nil ? ud.integer(forKey: "quickClockStartHour") : 8
+        quickClockStartMinute = ud.integer(forKey: "quickClockStartMinute")
+        quickClockEndHour = ud.object(forKey: "quickClockEndHour") != nil ? ud.integer(forKey: "quickClockEndHour") : 15
+        quickClockEndMinute = ud.integer(forKey: "quickClockEndMinute")
+
         Task { await checkStatus() }
     }
 
@@ -146,6 +177,15 @@ class FactorialService: ObservableObject {
             }
             openShift = result.openShift
             todayCompletedDuration = result.todayCompletedDuration
+            shiftSegments = result.segments
+            workdayStart = result.workdayStart
+
+            // Fetch holiday map and build 10-day history
+            let cal = Calendar.current
+            let tenDaysAgoDate = cal.date(byAdding: .day, value: -10, to: cal.startOfDay(for: Date()))!
+            let holidayMap = await fetchHolidayMap(accessToken: token, employeeId: employeeId, from: tenDaysAgoDate, to: Date())
+            recentDays = buildRecentDays(recentNodes: result.recentNodes, holidayMap: holidayMap)
+
             updateMenuBarTimer()
             status = ""
             needsAuth = false
@@ -599,6 +639,9 @@ class FactorialService: ObservableObject {
         let workers: [ProjectWorker]
         let openShift: OpenShift?
         let todayCompletedDuration: TimeInterval?
+        let segments: [ShiftSegment]
+        let workdayStart: Date?
+        let recentNodes: [[String: Any]]
     }
 
     private func fetchStatusData(accessToken: String, employeeId: Int) async throws -> StatusData {
@@ -608,8 +651,13 @@ class FactorialService: ObservableObject {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let cal = Calendar.current
+        let today = isoDate(Date())
+        let yesterday = isoDate(cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date()))!)
+        let tenDaysAgo = isoDate(cal.date(byAdding: .day, value: -10, to: cal.startOfDay(for: Date()))!)
+
         let query = """
-        query CheckStatus($employeeIds: [Int!]!, $today: ISO8601Date!, $assigned: Boolean!, $onlyActiveProjects: Boolean!) {
+        query CheckStatus($employeeIds: [Int!]!, $today: ISO8601Date!, $tenDaysAgo: ISO8601Date!, $yesterday: ISO8601Date!, $assigned: Boolean!, $onlyActiveProjects: Boolean!) {
           projectManagement {
             projectWorkers(assigned: $assigned, projectActive: $onlyActiveProjects, employeeIds: $employeeIds) {
               id
@@ -623,6 +671,9 @@ class FactorialService: ObservableObject {
             todayShifts: shiftsConnection(employeeIds: $employeeIds, startOn: $today, endOn: $today) {
               nodes { id clockIn clockOut workable }
             }
+            recentShifts: shiftsConnection(employeeIds: $employeeIds, startOn: $tenDaysAgo, endOn: $yesterday) {
+              nodes { date clockIn clockOut workable }
+            }
           }
         }
         """
@@ -630,7 +681,9 @@ class FactorialService: ObservableObject {
             "operationName": "CheckStatus",
             "variables": [
                 "employeeIds": [employeeId],
-                "today": isoDate(Date()),
+                "today": today,
+                "tenDaysAgo": tenDaysAgo,
+                "yesterday": yesterday,
                 "assigned": true,
                 "onlyActiveProjects": true
             ],
@@ -667,19 +720,167 @@ class FactorialService: ObservableObject {
             return OpenShift(id: id, clockIn: clockInDate, isBreak: isBreak)
         }.first
 
-        // Parse today completed shifts duration (sum of completed shifts, excluding open ones)
+        // Parse today's shifts into segments
         let todayNodes = (att?["todayShifts"] as? [String: Any])?["nodes"] as? [[String: Any]] ?? []
-        let completedDuration = todayNodes.reduce(0.0) { acc, node -> TimeInterval in
-            guard node["workable"] as? Bool != false,
-                  let inStr = node["clockIn"] as? String,
+        let completedSegments: [ShiftSegment] = todayNodes.compactMap { node in
+            guard let inStr = node["clockIn"] as? String,
+                  let ci = parseTodayTime(inStr),
                   let outStr = node["clockOut"] as? String,
-                  let clockIn = parseTodayTime(inStr),
-                  let clockOut = parseTodayTime(outStr) else { return acc }
-            return acc + clockOut.timeIntervalSince(clockIn)
+                  let co = parseTodayTime(outStr) else { return nil }
+            let isBreak = !(node["workable"] as? Bool ?? true)
+            return ShiftSegment(start: ci, end: co, isBreak: isBreak)
+        }.sorted { $0.start < $1.start }
+
+        var allSegments = completedSegments
+        if let shift = openShift {
+            allSegments.append(ShiftSegment(start: shift.clockIn, end: nil, isBreak: shift.isBreak))
+        }
+
+        let workdayStart = allSegments.filter { !$0.isBreak }.first?.start
+
+        let completedDuration = completedSegments.filter { !$0.isBreak }.reduce(0.0) { acc, seg in
+            guard let end = seg.end else { return acc }
+            return acc + end.timeIntervalSince(seg.start)
         }
         let todayCompletedDuration: TimeInterval? = completedDuration > 0 ? completedDuration : nil
 
-        return StatusData(workers: workers, openShift: openShift, todayCompletedDuration: todayCompletedDuration)
+        // Recent shifts for 10-day history
+        let recentNodes = ((att?["recentShifts"] as? [String: Any])?["nodes"] as? [[String: Any]]) ?? []
+
+        return StatusData(workers: workers, openShift: openShift, todayCompletedDuration: todayCompletedDuration,
+                          segments: allSegments, workdayStart: workdayStart, recentNodes: recentNodes)
+    }
+
+    // MARK: - Quick clock-in (full day for past dates)
+
+    func clockInFullDay(date: String) async throws {
+        quickClockingDates.insert(date)
+        defer { quickClockingDates.remove(date) }
+
+        let token = try await getAccessToken()
+
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.locale = Locale(identifier: "en_US_POSIX")
+        guard let dayDate = df.date(from: date) else {
+            throw FactorialError.apiError("Fecha inválida: \(date)")
+        }
+
+        let cal = Calendar.current
+        let startDate = cal.date(bySettingHour: quickClockStartHour, minute: quickClockStartMinute, second: 0, of: dayDate)!
+        let endDate = cal.date(bySettingHour: quickClockEndHour, minute: quickClockEndMinute, second: 0, of: dayDate)!
+
+        let shiftId = try await createShift(date: dayDate, startTime: startDate, endTime: endDate, accessToken: token)
+        try await createTimeRecord(shiftId: shiftId, projectWorkerId: selectedProjectWorkerId, accessToken: token)
+
+        celebratingDates.insert(date)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            self?.celebratingDates.remove(date)
+        }
+
+        await checkStatus()
+    }
+
+    // MARK: - Holiday calendar
+
+    private func fetchHolidayMap(accessToken: String, employeeId: Int, from: Date, to: Date) async -> [Date: String] {
+        let startOn = isoDate(from)
+        let endOn = isoDate(to)
+        guard let url = URL(string: "\(Self.baseURL)/attendance/calendar?start_on=\(startOn)&end_on=\(endOn)&id=\(employeeId)") else { return [:] }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await session.data(for: req),
+              let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let rawDays = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [:] }
+
+        let cal = Calendar.current
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.locale = Locale(identifier: "en_US_POSIX")
+
+        var map: [Date: String] = [:]
+        for day in rawDays {
+            let isLeave = day["is_leave"] as? Bool ?? false
+            let isLaborable = day["is_laborable"] as? Bool ?? true
+            if isLeave || !isLaborable {
+                if let dateStr = day["date"] as? String,
+                   let date = df.date(from: dateStr) {
+                    let leaves = day["leaves"] as? [[String: Any]] ?? []
+                    let name = leaves.first?["name"] as? String ?? "Festivo"
+                    map[cal.startOfDay(for: date)] = name
+                }
+            }
+        }
+        return map
+    }
+
+    // MARK: - Recent days computation
+
+    private func buildRecentDays(recentNodes: [[String: Any]], holidayMap: [Date: String]) -> [DaySummary] {
+        let cal = Calendar.current
+        let todayStart = cal.startOfDay(for: Date())
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.locale = Locale(identifier: "en_US_POSIX")
+
+        var shiftsByDate: [Date: [[String: Any]]] = [:]
+        for node in recentNodes {
+            guard let dateStr = node["date"] as? String,
+                  let date = df.date(from: dateStr) else { continue }
+            let key = cal.startOfDay(for: date)
+            shiftsByDate[key, default: []].append(node)
+        }
+
+        var days: [DaySummary] = []
+        for offset in 1...10 {
+            guard let day = cal.date(byAdding: .day, value: -offset, to: todayStart) else { continue }
+            let weekday = cal.component(.weekday, from: day)
+            guard weekday >= 2 && weekday <= 6 else { continue }
+
+            let holidayName = holidayMap[day]
+            let nodes = shiftsByDate[day] ?? []
+
+            var workedSeconds: TimeInterval = 0
+            var segments: [ShiftSegment] = []
+            for node in nodes {
+                guard let inStr = node["clockIn"] as? String,
+                      let outStr = node["clockOut"] as? String else { continue }
+                let isBreak = !(node["workable"] as? Bool ?? true)
+                let ciTime = parseTimeOnDate(inStr, on: day)
+                let coTime = parseTimeOnDate(outStr, on: day)
+                if let ci = ciTime, let co = coTime {
+                    segments.append(ShiftSegment(start: ci, end: co, isBreak: isBreak))
+                    if !isBreak { workedSeconds += co.timeIntervalSince(ci) }
+                }
+            }
+            segments.sort { $0.start < $1.start }
+            days.append(DaySummary(date: day, workedSeconds: workedSeconds, segments: segments, holidayName: holidayName))
+        }
+        return days.sorted { $0.date < $1.date }
+    }
+
+    /// Parse a Factorial time string and pin it to a specific date (not necessarily today).
+    private func parseTimeOnDate(_ str: String, on date: Date) -> Date? {
+        var s = str
+        if let i = s.firstIndex(of: "T") { s = String(s[s.index(after: i)...]) }
+        let timeOnly = String(s.prefix(8)).replacingOccurrences(of: "Z", with: "")
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        let cal = Calendar.current
+        for fmt in ["HH:mm:ss", "HH:mm"] {
+            df.dateFormat = fmt
+            if let t = df.date(from: timeOnly) {
+                let comps = cal.dateComponents([.hour, .minute, .second], from: t)
+                return cal.date(bySettingHour: comps.hour ?? 0,
+                                minute: comps.minute ?? 0,
+                                second: comps.second ?? 0,
+                                of: date)
+            }
+        }
+        return nil
     }
 
     // MARK: - Helpers

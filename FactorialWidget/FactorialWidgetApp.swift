@@ -61,7 +61,7 @@ private func buildMenuBarImage(timerText: String, shiftState: FactorialService.S
         let dotColor: NSColor = switch shiftState {
         case .active: .systemGreen
         case .paused: .systemOrange
-        case .idle:   .systemRed
+        case .idle:   .systemGray
         }
         dotColor.setFill()
         let dotRect = NSRect(x: x, y: midY - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
