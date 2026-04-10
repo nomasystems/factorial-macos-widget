@@ -773,6 +773,12 @@ class FactorialService: ObservableObject {
         let shiftId = try await createShift(date: dayDate, startTime: startDate, endTime: endDate, accessToken: token)
         try await createTimeRecord(shiftId: shiftId, projectWorkerId: selectedProjectWorkerId, accessToken: token)
 
+        let isToday = Calendar.current.isDateInToday(dayDate)
+        OTelClient.shared.track("quick_clock_in", [
+            "project.worker.id": String(selectedProjectWorkerId),
+            "entry.is_today": isToday ? "true" : "false"
+        ])
+
         celebratingDates.insert(date)
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(1.5))
